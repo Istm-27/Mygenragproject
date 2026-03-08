@@ -18,7 +18,7 @@ GenRAG is a terminal tool designed to set up a Retrieval-Augmented Generation Pi
 
 1. Clone the repository:
     ```sh
-    git clone https://github.com/adityaghai07/GenRAG.git
+    git clone https://github.com/Istm-27/GenRAG.git
     cd GenRAG
     ```
 
