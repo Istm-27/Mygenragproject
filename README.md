@@ -18,8 +18,8 @@ GenRAG is a terminal tool designed to set up a Retrieval-Augmented Generation Pi
 
 1. Clone the repository:
     ```sh
-    git clone https://github.com/Istm-27/Mygenrag.git
-    cd Mygenrag
+    git clone https://github.com/Istm-27/Mygenragproject.git
+    cd Mygenragproject
     ```
 
 2. Create and activate a virtual environment:
