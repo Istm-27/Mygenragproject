@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timezone
 
 import pymupdf
+import requests
 import streamlit as st
 import torch
 from google import genai
@@ -23,6 +24,7 @@ MAX_PAGES = 150            # keep memory/CPU within the free tier
 MAX_MB = 20
 TOP_K = 5
 GEMINI_MODEL = "gemini-2.5-flash"
+GROQ_MODEL = "openai/gpt-oss-120b"   # override with a GROQ_MODEL secret if Groq retires it
 
 st.set_page_config(page_title="GenRAG – Ask your PDF", page_icon="📄", layout="wide")
 
@@ -40,14 +42,17 @@ def load_nlp():
     return nlp
 
 
+def get_secret(name: str, default=None):
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return value or os.environ.get(name) or default
+
+
 @st.cache_resource
 def load_gemini():
-    key = None
-    try:
-        key = st.secrets.get("GEMINI_API_KEY")
-    except Exception:
-        pass
-    key = key or os.environ.get("GEMINI_API_KEY")
+    key = get_secret("GEMINI_API_KEY")
     return genai.Client(api_key=key) if key else None
 
 
@@ -89,10 +94,41 @@ def retrieve(index: dict, query: str, k: int = TOP_K):
     return [(float(s), index["chunks"][int(i)]) for s, i in zip(top.values, top.indices)]
 
 
-def generate(query: str, hits) -> str:
+def _ask_gemini(prompt: str) -> str:
     client = load_gemini()
     if client is None:
-        return "_Answer generation is unavailable (no Gemini API key configured). The retrieved passages are shown below._"
+        raise RuntimeError("no GEMINI_API_KEY")
+    resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    if not resp.text:
+        raise RuntimeError("empty response")
+    return resp.text
+
+
+def _ask_groq(prompt: str) -> str:
+    key = get_secret("GROQ_API_KEY")
+    if not key:
+        raise RuntimeError("no GROQ_API_KEY")
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": get_secret("GROQ_MODEL", GROQ_MODEL),
+              "messages": [{"role": "user", "content": prompt}],
+              "temperature": 0.2},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
+    text = r.json()["choices"][0]["message"].get("content")
+    if not text:
+        raise RuntimeError("empty response")
+    return text
+
+
+# Try providers in order; fall back to the next one on any failure (quota, rate limit, outage).
+PROVIDERS = [("Gemini", _ask_gemini), ("Groq", _ask_groq)]
+
+
+def generate(query: str, hits) -> tuple[str, str | None]:
     context = "\n\n".join(f"[{n}] (page {c['page']}) {c['text']}" for n, (_, c) in enumerate(hits, 1))
     prompt = f"""You answer questions about a document using ONLY the numbered passages below.
 - Cite the passages you used like [1] or [2][3].
@@ -103,17 +139,22 @@ PASSAGES:
 {context}
 
 QUESTION: {query}"""
-    try:
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        return resp.text or "_The model returned an empty response._"
-    except Exception as e:  # rate limit, quota, network
-        return f"_Answer generation failed ({type(e).__name__}); the API may be rate-limited. The retrieved passages are shown below._"
+    errors = []
+    for name, ask in PROVIDERS:
+        try:
+            return ask(prompt), name
+        except Exception as e:
+            msg = str(e).replace("\n", " ")[:160]
+            print(f"[llm] {name} failed: {type(e).__name__}: {msg}", flush=True)
+            errors.append(f"{name}: {msg}")
+    return ("_Answer generation is unavailable right now ("
+            + "; ".join(errors) + "). The retrieved passages are shown below._"), None
 
 
 st.title("📄 GenRAG – Ask questions about any PDF")
 st.caption(
     "Retrieval-augmented generation built from scratch, without LangChain or a vector database: "
-    "spaCy sentence chunking, `all-mpnet-base-v2` embeddings, dot-product retrieval and Gemini, "
+    "spaCy sentence chunking, `all-mpnet-base-v2` embeddings, dot-product retrieval and an LLM (Gemini, with automatic fallback to Groq), "
     "with answers cited back to the passages they came from. "
     "[Source code](https://github.com/Istm-27/Mygenragproject)"
 )
@@ -140,15 +181,16 @@ with right:
                 st.error("Couldn't extract text from this PDF (it may be a scanned image).")
             else:
                 hits = retrieve(index, query.strip())
-                with st.spinner("Asking Gemini…"):
-                    ans = generate(query.strip(), hits)
+                with st.spinner("Generating the answer…"):
+                    ans, provider = generate(query.strip(), hits)
                 usage = usage_counter()
                 usage["queries"] += 1
                 print(f"[usage] {datetime.now(timezone.utc).isoformat()} queries={usage['queries']} docs={usage['documents']}", flush=True)
 
                 st.subheader("Answer")
                 st.markdown(ans)
-                st.caption(f"Indexed {index['pages']} pages into {len(index['chunks'])} chunks.")
+                st.caption(f"Indexed {index['pages']} pages into {len(index['chunks'])} chunks."
+                           + (f" Answer by {provider}." if provider else ""))
                 st.subheader("Retrieved passages")
                 for n, (score, c) in enumerate(hits, 1):
                     with st.expander(f"[{n}] Page {c['page']} · similarity {score:.3f}", expanded=(n == 1)):
