@@ -1,7 +1,8 @@
-# CPU-only PyTorch wheel (much smaller than the default CUDA build). Requires Python 3.12.
-torch @ https://download.pytorch.org/whl/cpu/torch-2.5.1%2Bcpu-cp312-cp312-linux_x86_64.whl
+# CPU-only PyTorch (much smaller than the default CUDA build); works on any Python version
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
 streamlit>=1.40
-sentence-transformers>=3.0,<6
+sentence-transformers>=3.0
 pymupdf>=1.24
-spacy>=3.7,<4
+spacy>=3.8
 google-genai>=1.0
